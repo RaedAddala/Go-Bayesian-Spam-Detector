@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -10,18 +12,15 @@ import (
 // \p{L} matches any letter in any script (Latin, Cyrillic, Arabic, CJK, etc.) and \p{N} matches digits in any script.
 var nonWordRegex = regexp.MustCompile(`[^\p{L}\p{N}\s]+`)
 
-func main() {
+func populateBagOfWords(path string, bagOfWords map[string]int) error {
 
-	const filepath = "./data/enron1/ham/0002.1999-12-13.farmer.ham.txt"
-	content, err := os.ReadFile(filepath)
+	content, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Printf("An error occurred: %v\n", err)
-		return
+		return err
 	}
-	text := strings.ToLower(string(content))
-	text = nonWordRegex.ReplaceAllString(text, " ")
+	text := nonWordRegex.ReplaceAllString(strings.ToLower(string(content)), " ")
 	tokens := strings.Fields(text)
-	freqs := map[string]int{}
 	filtered := make([]string, 0, len(tokens))
 	for _, t := range tokens {
 		if len(t) > 2 && len(t) <= 30 {
@@ -29,8 +28,30 @@ func main() {
 		}
 	}
 	for _, token := range filtered {
-		freqs[token] += 1
+		bagOfWords[token] += 1
 	}
+	return nil
+}
+
+func main() {
+	freqs := map[string]int{}
+
+	const path = "./data/enron1"
+	err := filepath.WalkDir(path, func(path string, d fs.DirEntry, err error) error {
+		if d.IsDir() {
+			return nil
+		}
+		err = populateBagOfWords(path, freqs)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
 	totalCount := 0
 	for token := range freqs {
 		totalCount += freqs[token]
@@ -38,4 +59,5 @@ func main() {
 	for token := range freqs {
 		fmt.Printf("<%s> => %d , %f .\n", token, freqs[token], float64(freqs[token])/float64(totalCount))
 	}
+	fmt.Printf("Total Count is : %d\n", totalCount)
 }
