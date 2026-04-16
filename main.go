@@ -12,14 +12,8 @@ import (
 // \p{L} matches any letter in any script (Latin, Cyrillic, Arabic, CJK, etc.) and \p{N} matches digits in any script.
 var nonWordRegex = regexp.MustCompile(`[^\p{L}\p{N}\s]+`)
 
-func populateBagOfWords(path string, bagOfWords map[string]int) error {
-
-	content, err := os.ReadFile(path)
-	if err != nil {
-		fmt.Printf("An error occurred: %v\n", err)
-		return err
-	}
-	text := nonWordRegex.ReplaceAllString(strings.ToLower(string(content)), " ")
+func cleanup(s string) []string {
+	text := nonWordRegex.ReplaceAllString(strings.ToLower(string(s)), " ")
 	tokens := strings.Fields(text)
 	filtered := make([]string, 0, len(tokens))
 	for _, t := range tokens {
@@ -27,6 +21,18 @@ func populateBagOfWords(path string, bagOfWords map[string]int) error {
 			filtered = append(filtered, t)
 		}
 	}
+	return filtered
+}
+
+
+func populateBagOfWords(path string, bagOfWords map[string]int) error {
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("An error occurred: %v\n", err)
+		return err
+	}
+	filtered := cleanup(string(content))
 	for _, token := range filtered {
 		bagOfWords[token] += 1
 	}
