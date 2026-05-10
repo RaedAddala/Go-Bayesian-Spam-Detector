@@ -34,23 +34,18 @@ func populateBagOfWords(path string, bagOfWords map[string]int, mu *sync.Mutex) 
 	filtered := cleanup(string(content))
 	mu.Lock()
 	for _, token := range filtered {
-		bagOfWords[token] += 1
+		bagOfWords[token]++
 	}
 	mu.Unlock()
 	return nil
 }
 
-func main() {
-	freqs := map[string]int{}
-	var mu sync.Mutex
-
-	const path = "./data/enron1"
-	const maxWorkers = 8
-
+// Process a directory (ham or spam)
+func processDirectory(dirPath string, bag map[string]int, mu *sync.Mutex, maxWorkers int) error {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxWorkers)
 
-	err := filepath.WalkDir(path, func(p string, d fs.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(dirPath, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			log.Printf("Walk error at %s: %v", p, walkErr)
 			return nil
@@ -66,7 +61,7 @@ func main() {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if procErr := populateBagOfWords(filePath, freqs, &mu); procErr != nil {
+			if procErr := populateBagOfWords(filePath, bag, mu); procErr != nil {
 				log.Printf("Failed to process file %s: %v", filePath, procErr)
 			}
 		}(p)
@@ -75,17 +70,62 @@ func main() {
 	})
 
 	if err != nil {
-		log.Printf("WalkDir finished with error: %v", err)
+		log.Printf("WalkDir error in %s: %v", dirPath, err)
 	}
 
 	wg.Wait()
+	return nil
+}
 
-	totalCount := 0
-	for _, count := range freqs {
-		totalCount += count
+func main() {
+	const basePath = "./data/enron1"
+	const maxWorkers = 8
+
+	hamBag := make(map[string]int)
+	spamBag := make(map[string]int)
+
+	var hamMu, spamMu sync.Mutex
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		hamPath := filepath.Join(basePath, "ham")
+		if err := processDirectory(hamPath, hamBag, &hamMu, maxWorkers); err != nil {
+			log.Printf("Error processing ham: %v", err)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		spamPath := filepath.Join(basePath, "spam")
+		if err := processDirectory(spamPath, spamBag, &spamMu, maxWorkers); err != nil {
+			log.Printf("Error processing spam: %v", err)
+		}
+	}()
+
+	wg.Wait()
+
+	fmt.Println("=== HAM BAG OF WORDS ===")
+	printBag("ham", hamBag)
+
+	fmt.Println("\n=== SPAM BAG OF WORDS ===")
+	printBag("spam", spamBag)
+}
+
+func printBag(label string, bag map[string]int) {
+	total := 0
+	for _, count := range bag {
+		total += count
 	}
-	for token, count := range freqs {
-		fmt.Printf("<%s> => %d , %f .\n", token, count, float64(count)/float64(totalCount))
+
+	fmt.Printf("Total tokens in %s: %d\n", label, total)
+	// Show well used tokens
+	for token, count := range bag {
+		if count >= 100 {
+			prob := float64(count) / float64(total)
+			fmt.Printf("<%s> => %d (%.6f)\n", token, count, prob)
+		}
 	}
-	fmt.Printf("Total Count is : %d\n", totalCount)
 }
