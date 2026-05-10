@@ -9,13 +9,16 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // \p{L} matches any letter in any script (Latin, Cyrillic, Arabic, CJK, etc.) and \p{N} matches digits in any script.
 var nonWordRegex = regexp.MustCompile(`[^\p{L}\p{N}\s]+`)
 
 func cleanup(s string) []string {
-	text := nonWordRegex.ReplaceAllString(strings.ToLower(s), " ")
+	normalized := norm.NFKC.String(s)
+	text := nonWordRegex.ReplaceAllString(strings.ToLower(normalized), " ")
 	tokens := strings.Fields(text)
 	filtered := make([]string, 0, len(tokens))
 	for _, t := range tokens {
