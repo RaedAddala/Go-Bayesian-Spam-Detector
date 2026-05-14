@@ -6,38 +6,57 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 )
 
-// \p{L} matches any letter in any script (Latin, Cyrillic, Arabic, CJK, etc.) and \p{N} matches digits in any script.
-var nonWordRegex = regexp.MustCompile(`[^\p{L}\p{N}\s]+`)
+func cleanup(content []byte) []string {
+	normalized := norm.NFKC.Bytes(content)
 
-func cleanup(s string) []string {
-	normalized := norm.NFKC.String(s)
-	text := nonWordRegex.ReplaceAllString(strings.ToLower(normalized), " ")
-	tokens := strings.Fields(text)
-	filtered := make([]string, 0, len(tokens))
-	for _, t := range tokens {
-		if len(t) > 2 && len(t) <= 30 {
-			filtered = append(filtered, t)
+	filtered := make([]string, 0, len(normalized)/5) // Pre-allocate slice capacity to reduce memory re-allocations
+	var word strings.Builder
+	word.Grow(30) // Pre-size the builder for an average word
+
+	for i := 0; i < len(normalized); {
+		r, size := utf8.DecodeRune(normalized[i:])
+		i += size
+
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			word.WriteRune(unicode.ToLower(r))
+		} else {
+			if word.Len() > 2 && word.Len() <= 30 {
+				filtered = append(filtered, word.String())
+			}
+			word.Reset()
 		}
+	}
+
+	// Capture the final word
+	if word.Len() > 2 && word.Len() <= 30 {
+		filtered = append(filtered, word.String())
 	}
 	return filtered
 }
 
-func populateBagOfWords(path string, bagOfWords map[string]int, mu *sync.Mutex) error {
+func populateBagOfWords(path string, globalBag map[string]int, mu *sync.Mutex) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	filtered := cleanup(string(content))
-	mu.Lock()
+	filtered := cleanup(content)
+
+	localBag := make(map[string]int)
 	for _, token := range filtered {
-		bagOfWords[token]++
+		localBag[token]++
+	}
+
+	mu.Lock()
+	for token, count := range localBag {
+		globalBag[token] += count
 	}
 	mu.Unlock()
 	return nil
