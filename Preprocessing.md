@@ -29,19 +29,26 @@ The goal of preprocessing is therefore to reduce semantically equivalent text in
 
 ## Unicode-Aware Text Cleaning
 
-The preprocessing pipeline starts with a Unicode-aware regular expression:
+Rather than using expensive regular expressions, we iterate through the byte stream and evaluate each character (rune) directly:
 
 ```golang
-var nonWordRegex = regexp.MustCompile(`[^\p{L}\p{N}\s]+`)
+for i := 0; i < len(normalized); {
+   r, size := utf8.DecodeRune(normalized[i:])
+   i += size
+   if unicode.IsLetter(r) || unicode.IsDigit(r) {
+       word.WriteRune(unicode.ToLower(r))
+   } else {
+       // Token boundary logic...
+   }
 ```
 
-This expression removes every character that is **not**:
+This approach avoids the overhead of a regex engine and works correctly with multilingual text by leveraging Go's `unicode` package.
 
-* `\p{L}` : any Unicode letter
-* `\p{N}` : any Unicode digit
-* `\s` : whitespace
+This approach works correctly with multilingual text and preserves characters from many writing systems.
 
-This approach works correctly with multilingual text and preserves characters from many writing systems. The text is also converted to lowercase before tokenization.
+## Memory Efficiency
+
+Converting the initial raw file data (`[]byte`) to a `string` creates an unnecessary copy of the entire file in memory. Processing the byte slice directly reduces the load on the Garbage Collector and improves performance during high-concurrency tasks.
 
 ## Unicode Normalization
 
@@ -60,10 +67,8 @@ Although these strings look identical, they are different byte sequences and wou
 golang.org/x/text/unicode/norm
 ```
 
-The preprocessing pipeline applies:
+The preprocessing pipeline applies **NFKC** normalization directly to the raw bytes using `norm.NFKC.Bytes(content)`. This ensures consistent token generation across different Unicode encodings while avoiding unnecessary string allocations before the cleaning phase.
 
-* decomposition
-* canonicalization
-* recomposition
+## About Concurrency Handling
 
-to ensure consistent token generation across different Unicode encodings. This prevents duplicate entries in the vocabulary caused by Unicode inconsistencies. It is especially important in spam filtering because malicious users frequently exploit Unicode ambiguities to bypass detection systems.
+To prevent "Lock Contention" tokens should be aggregated into a local map for each file. The global "Bag of Words" should only be locked once per file to merge these local results, ensuring that multiple CPU cores aren't stalled waiting for a single mutex.
