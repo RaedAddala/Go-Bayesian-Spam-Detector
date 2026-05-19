@@ -20,7 +20,7 @@ References:
 
 ## Project layout
 
-- `main.go`: wires everything together (train on `enron1..enron5`, test on `enron6`)
+- `main.go`: wires everything together (**6-fold cross-validation** over `enron1..enron6`)
 - `ingest.go`: concurrent ingestion and vocabulary (bag-of-words) construction
 - `preprocessing.go`: Unicode normalization, cleaning, and tokenization
 - `model.go`: Naive Bayes model (log-space) and Laplace smoothing
@@ -102,14 +102,15 @@ To reduce noise and vocabulary fragmentation, `logWordProb()` ignores tokens who
 
 From the repository root:
 
-- Train on `enron1..enron5`
-- Evaluate on `enron6`
+- Run **6-fold cross-validation** (each `enron*` collection is used once as the test fold)
 
 Use:
 
 ```bash
 go run .
 ```
+
+Output includes per-fold metrics plus timing for **preprocess+ingest**, **train**, and **classify+eval**, and aggregate (micro/macro) metrics.
 
 See [`RESULTS.md`](RESULTS.md) for the latest recorded metrics and confusion matrix.
 
@@ -119,4 +120,4 @@ Edit constants in `main.go`:
 
 - `maxWorkers`: concurrency for ingestion
 - `minCount`: ignore tokens rarer than this across both corpora
-- `trainFolders` / `testFolder`: dataset split
+- `folds`: which Enron collections to include in the cross-validation
