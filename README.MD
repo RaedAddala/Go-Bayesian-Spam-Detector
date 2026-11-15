@@ -21,11 +21,13 @@ References:
 ## Project layout
 
 - `main.go`: wires everything together (**6-fold cross-validation** over `enron1..enron6`)
-- `ingest.go`: concurrent ingestion and vocabulary (bag-of-words) construction
+- `ingest.go`: concurrent per-folder ingestion (bag-of-words) and corpus merging
 - `preprocessing.go`: Unicode normalization, cleaning, and tokenization
 - `model.go`: Naive Bayes model (log-space) and Laplace smoothing
-- `evaluate.go`: evaluation loop over `ham/` and `spam/` folders
+- `evaluate.go`: concurrent evaluation over `ham/` and `spam/` folders
 - `metrics.go`: accuracy, precision, recall, F1, and confusion matrix counters
+- `*_test.go`: unit tests (`go test ./...`)
+- [`TODO.md`](TODO.md): planned experiments and improvements
 
 Dataset is expected under `./data/` with folders like `enron1/ham`, `enron1/spam`, ...
 
@@ -33,21 +35,16 @@ Dataset is expected under `./data/` with folders like `enron1/ham`, `enron1/spam
 
 ### Ingestion (training bags)
 
-Training data is read from multiple Enron folders (configured in `main.go`).
+Every Enron folder is tokenized **exactly once**, at startup. `ingestFolder()` returns a `Corpus` per folder:
 
-`ingestFolders()` builds two global maps:
+- `HamBag`, `SpamBag`: `map[token]count`
+- `NumHam`, `NumSpam`: number of documents (emails) read per class
 
-- `hamBag: map[token]count`
-- `spamBag: map[token]count`
+For each fold, `mergeCorpora()` sums the corpora of the 5 training folders into a fresh `Corpus` (the cached per-folder corpora are not modified). This avoids re-reading and re-tokenizing each email 5 times across the 6 folds.
 
-It also counts the number of training documents (emails) per class.
+Within a directory, files are tokenized by a pool of `maxWorkers` goroutines. Each worker counts into its own bag, and the worker bags are merged once at the end, so there is no shared lock while tokenizing.
 
-To improve throughput, ingestion walks the directory and processes files using a worker semaphore:
-
-- `maxWorkers` controls the maximum number of concurrent file-processing goroutines
-- each file is tokenized into a **local** bag first, then merged into the global map under a mutex
-
-This keeps shared-map contention low and makes ingestion scale better on multi-core machines.
+Errors are not swallowed: a missing directory or an unreadable file aborts the run with an error, and a class with zero training documents is rejected by `NewModel()`.
 
 ### Preprocessing
 
@@ -60,7 +57,7 @@ Key properties:
 - **Token rules:**
   - keep letters and digits; lowercase everything
   - treat everything else as a delimiter
-  - discard very short tokens (`<= 2`) and very long tokens (`> 30`)
+  - discard very short tokens (`<= 2` characters) and very long tokens (`> 30` characters); lengths are counted in runes, not bytes
 
 More details are documented in [`Preprocessing.md`](Preprocessing.md).
 
@@ -82,11 +79,13 @@ $$\log P(c|doc) = \log P(c) + \sum_{tok \in doc} \log P(tok|c)$$
 
 #### Rare-token filtering (`minCount`)
 
-To reduce noise and vocabulary fragmentation, `logWordProb()` ignores tokens whose combined frequency $(hamCount + spamCount) < minCount$ (`minCount` is configured in `main.go`).
+To reduce noise and vocabulary fragmentation, `NewModel()` leaves out of the vocabulary every token whose combined frequency $(hamCount + spamCount) < minCount$ (`minCount` is configured in `main.go`). Those tokens are ignored at classification time, just like unseen tokens.
+
+The smoothing terms are computed over the kept vocabulary only: $|V|$ is the number of kept tokens and $totalTokens(c)$ is the sum of their counts in class $c$. The per-token log-probabilities are precomputed when the model is built.
 
 ### Evaluation
 
-`evaluateModel()` walks `testDir/ham` and `testDir/spam`, classifies each email, and updates:
+`evaluateModel()` lists `testDir/ham` and `testDir/spam` and classifies the emails with a pool of `maxWorkers` goroutines (the model is read-only, so it is shared safely). Each worker keeps its own counters, which are summed at the end:
 
 - totals (`Total`, `Correct`)
 - confusion matrix counters (`TP`, `FP`, `TN`, `FN`)
@@ -110,7 +109,13 @@ Use:
 go run .
 ```
 
-Output includes per-fold metrics plus timing for **preprocess+ingest**, **train**, and **classify+eval**, and aggregate (micro/macro) metrics.
+Output includes the one-time **preprocess+ingest** time, per-fold metrics with timing for **merge**, **train**, and **classify+eval**, and aggregate (micro/macro) metrics.
+
+Run the unit tests with:
+
+```bash
+go test ./...
+```
 
 See [`RESULTS.md`](RESULTS.md) for the latest recorded metrics and confusion matrix.
 
@@ -118,6 +123,6 @@ See [`RESULTS.md`](RESULTS.md) for the latest recorded metrics and confusion mat
 
 Edit constants in `main.go`:
 
-- `maxWorkers`: concurrency for ingestion
+- `maxWorkers`: concurrency for ingestion and evaluation
 - `minCount`: ignore tokens rarer than this across both corpora
 - `folds`: which Enron collections to include in the cross-validation

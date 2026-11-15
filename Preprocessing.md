@@ -27,6 +27,17 @@ Without normalization, the classifier would treat all of these as unrelated toke
 
 The goal of preprocessing is therefore to reduce semantically equivalent text into a consistent canonical representation before tokenization.
 
+### What the current pipeline actually handles
+
+| Variant | Result of `cleanup()` | Handled? |
+| --- | --- | --- |
+| `FREE`, `free`, `FrEe` | `free` | Yes (lowercasing) |
+| `ｆｒｅｅ` (full-width) | `free` | Yes (NFKC) |
+| `frëe` | `frëe` | **No**: NFKC keeps diacritics; stripping them needs NFD + removing combining marks |
+| `f.r.e.e` | *(nothing)* | **No**: the dots split it into 1-letter pieces, which are then dropped as too short |
+
+The two unhandled cases are tracked in [`TODO.md`](TODO.md).
+
 ## Unicode-Aware Text Cleaning
 
 Rather than using expensive regular expressions, we iterate through the byte stream and evaluate each character (rune) directly:
@@ -45,7 +56,7 @@ for i := 0; i < len(normalized); {
 
 This approach avoids the overhead of a regex engine and works correctly with multilingual text by leveraging Go's `unicode` package.
 
-This approach works correctly with multilingual text and preserves characters from many writing systems.
+Tokens shorter than 3 or longer than 30 characters are discarded. These lengths are counted in **runes**, not bytes, so that a 2-letter word such as `ça` (3 bytes in UTF-8) is treated the same as `of`.
 
 ## Memory Efficiency
 
@@ -72,4 +83,6 @@ The preprocessing pipeline applies **NFKC** normalization directly to the raw by
 
 ## About Concurrency Handling
 
-To prevent lock contention, tokens should be aggregated into a local map for each file. The global bag of words should only be locked once per file to merge these local results, ensuring that multiple CPU cores aren't stalled waiting for a single mutex.
+To avoid lock contention, each ingestion worker counts tokens into its own map for every file it processes. The worker maps are merged once, after all files in the directory are done, so no mutex is taken while tokenizing.
+
+Each Enron folder is tokenized only once. Cross-validation folds reuse the cached per-folder bags and sum them, instead of re-tokenizing the training emails for every fold.

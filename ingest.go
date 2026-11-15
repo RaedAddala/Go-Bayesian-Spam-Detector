@@ -1,8 +1,8 @@
 package main
 
 import (
-	"io/fs"
-	"log"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -10,143 +10,108 @@ import (
 
 type Bag map[string]int
 
-func populateBagOfWords(path string, bow Bag) error {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	filtered := cleanup(content)
-
-	for _, token := range filtered {
-		bow[token]++
-	}
-	return nil
+// Corpus holds the token counts and document counts for one or more Enron folders.
+type Corpus struct {
+	HamBag  Bag
+	SpamBag Bag
+	NumHam  int
+	NumSpam int
 }
 
-func populateBagOfWordsWithLock(path string, globalBag Bag, mu *sync.Mutex) error {
-	content, err := os.ReadFile(path)
+// listFiles returns the paths of the regular files directly inside dir.
+func listFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	filtered := cleanup(content)
-
-	localBag := make(Bag)
-	for _, token := range filtered {
-		localBag[token]++
-	}
-
-	mu.Lock()
-	for token, count := range localBag {
-		globalBag[token] += count
-	}
-	mu.Unlock()
-	return nil
-}
-
-// Process a directory (ham or spam)
-func processDirectory(dirPath string, bag Bag, mu *sync.Mutex, maxWorkers int) error {
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, maxWorkers)
-
-	err := filepath.WalkDir(dirPath, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			log.Printf("Walk error at %s: %v", p, walkErr)
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-
-		sem <- struct{}{}
-		wg.Add(1)
-
-		go func(filePath string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			if procErr := populateBagOfWordsWithLock(filePath, bag, mu); procErr != nil {
-				log.Printf("Failed to process file %s: %v", filePath, procErr)
-			}
-		}(p)
-
-		return nil
-	})
-
-	if err != nil {
-		log.Printf("WalkDir error in %s: %v", dirPath, err)
-	}
-
-	wg.Wait()
-	return nil
-}
-
-func countBag(bag Bag) int {
-	total := 0
-	for _, count := range bag {
-		total += count
-	}
-	return total
-}
-
-func countFiles(dirPath string) (int, error) {
-	entries, err := os.ReadDir(dirPath)
-	if err != nil {
-		return 0, err
-	}
-	n := 0
+	paths := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if !e.IsDir() {
-			n++
+		if e.Type().IsRegular() {
+			paths = append(paths, filepath.Join(dir, e.Name()))
 		}
 	}
-	return n, nil
+	return paths, nil
 }
 
-func ingestFolders(baseDir string, folders []string, maxWorkers int) (Bag, Bag, int, int, error) {
-	hamBag := make(Bag)
-	spamBag := make(Bag)
-
-	var hamMu, spamMu, countMu sync.Mutex
-	var numHamDocs, numSpamDocs int
-	var wg sync.WaitGroup
-
-	for _, folder := range folders {
-		hamPath := filepath.Join(baseDir, folder, "ham")
-		spamPath := filepath.Join(baseDir, folder, "spam")
-
-		wg.Add(2)
-
-		go func(p string) {
-			defer wg.Done()
-			if err := processDirectory(p, hamBag, &hamMu, maxWorkers); err != nil {
-				log.Printf("Error processing %s: %v", p, err)
-			}
-			n, err := countFiles(p)
-			if err != nil {
-				log.Printf("Error counting %s: %v", p, err)
-				return
-			}
-			countMu.Lock()
-			numHamDocs += n
-			countMu.Unlock()
-		}(hamPath)
-
-		go func(p string) {
-			defer wg.Done()
-			if err := processDirectory(p, spamBag, &spamMu, maxWorkers); err != nil {
-				log.Printf("Error processing %s: %v", p, err)
-			}
-			n, err := countFiles(p)
-			if err != nil {
-				log.Printf("Error counting %s: %v", p, err)
-				return
-			}
-			countMu.Lock()
-			numSpamDocs += n
-			countMu.Unlock()
-		}(spamPath)
+// ingestDirectory tokenizes every file in dir with up to maxWorkers goroutines.
+// Each worker counts into its own Bag (no shared lock); the bags are merged at the end.
+// It returns the merged bag and the number of documents read, or an error if the
+// directory or any file in it cannot be read.
+func ingestDirectory(dir string, maxWorkers int) (Bag, int, error) {
+	paths, err := listFiles(dir)
+	if err != nil {
+		return nil, 0, err
 	}
 
+	jobs := make(chan string)
+	bags := make([]Bag, maxWorkers)
+	errs := make([]error, maxWorkers)
+
+	var wg sync.WaitGroup
+	for w := range maxWorkers {
+		wg.Go(func() {
+			bag := make(Bag)
+			for p := range jobs {
+				if errs[w] != nil {
+					continue // keep draining so the sender never blocks
+				}
+				content, err := os.ReadFile(p)
+				if err != nil {
+					errs[w] = err
+					continue
+				}
+				for _, tok := range cleanup(content) {
+					bag[tok]++
+				}
+			}
+			bags[w] = bag
+		})
+	}
+	for _, p := range paths {
+		jobs <- p
+	}
+	close(jobs)
 	wg.Wait()
-	return hamBag, spamBag, numHamDocs, numSpamDocs, nil
+
+	if err := errors.Join(errs...); err != nil {
+		return nil, 0, err
+	}
+
+	merged := bags[0]
+	for _, b := range bags[1:] {
+		for tok, c := range b {
+			merged[tok] += c
+		}
+	}
+	return merged, len(paths), nil
+}
+
+// ingestFolder tokenizes <baseDir>/<folder>/ham and <baseDir>/<folder>/spam.
+func ingestFolder(baseDir, folder string, maxWorkers int) (Corpus, error) {
+	hamBag, numHam, err := ingestDirectory(filepath.Join(baseDir, folder, "ham"), maxWorkers)
+	if err != nil {
+		return Corpus{}, fmt.Errorf("%s/ham: %w", folder, err)
+	}
+	spamBag, numSpam, err := ingestDirectory(filepath.Join(baseDir, folder, "spam"), maxWorkers)
+	if err != nil {
+		return Corpus{}, fmt.Errorf("%s/spam: %w", folder, err)
+	}
+	return Corpus{HamBag: hamBag, SpamBag: spamBag, NumHam: numHam, NumSpam: numSpam}, nil
+}
+
+// mergeCorpora sums the bags and document counts of parts into a new Corpus.
+// The inputs are not modified, so per-folder corpora can be reused across folds.
+func mergeCorpora(parts ...Corpus) Corpus {
+	out := Corpus{HamBag: make(Bag), SpamBag: make(Bag)}
+	for _, p := range parts {
+		for tok, c := range p.HamBag {
+			out.HamBag[tok] += c
+		}
+		for tok, c := range p.SpamBag {
+			out.SpamBag[tok] += c
+		}
+		out.NumHam += p.NumHam
+		out.NumSpam += p.NumSpam
+	}
+	return out
 }

@@ -1,99 +1,86 @@
 package main
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 type Model struct {
 	TokenToID  map[string]uint32
 	HamCounts  []uint32
 	SpamCounts []uint32
 
-	hamTokens  uint32
-	spamTokens uint32
+	// Totals and |V| cover only the kept vocabulary (tokens with
+	// hamCount+spamCount >= minCount), so the Laplace-smoothed distribution
+	// is over exactly the tokens that are scored.
+	hamTokens  uint64
+	spamTokens uint64
 	vocabSize  uint32 // |V| for Laplace smoothing denominator
 
-	minCount uint32 // tokens with hamCount+spamCount below this are skipped
+	// Precomputed log P(token | class), indexed by token ID.
+	logProbHam  []float64
+	logProbSpam []float64
 
 	logPriorHam  float64
 	logPriorSpam float64
 }
 
 // numHamDocs / numSpamDocs are document counts (emails).
-func NewModel(hamBag, spamBag Bag, numHamDocs, numSpamDocs, minCount int) *Model {
-	// Build a single token->ID mapping across both corpora.
-	tokenToID := make(map[string]uint32, len(hamBag)+len(spamBag))
+// Tokens whose combined ham+spam count is below minCount are left out of the
+// vocabulary entirely and are ignored at classification time.
+func NewModel(hamBag, spamBag Bag, numHamDocs, numSpamDocs, minCount int) (*Model, error) {
+	if numHamDocs <= 0 || numSpamDocs <= 0 {
+		return nil, fmt.Errorf("need at least one document per class, got %d ham and %d spam", numHamDocs, numSpamDocs)
+	}
 
-	var id uint32
-	add := func(tok string) uint32 {
-		if existing, ok := tokenToID[tok]; ok {
-			return existing
+	totalDocs := float64(numHamDocs + numSpamDocs)
+	tokenToID := make(map[string]uint32)
+	var hamCounts, spamCounts []uint32
+	var hamTokens, spamTokens uint64
+
+	keep := func(tok string, h, s int) {
+		if h+s < minCount {
+			return
 		}
-		tokenToID[tok] = id
-		id++
-		return id - 1
+		tokenToID[tok] = uint32(len(hamCounts))
+		hamCounts = append(hamCounts, uint32(h))
+		spamCounts = append(spamCounts, uint32(s))
+		hamTokens += uint64(h)
+		spamTokens += uint64(s)
 	}
 
-	for tok := range hamBag {
-		add(tok)
+	for tok, h := range hamBag {
+		keep(tok, h, spamBag[tok])
 	}
-	for tok := range spamBag {
-		add(tok)
-	}
-
-	hamCounts := make([]uint32, id)
-	spamCounts := make([]uint32, id)
-
-	var hamTokens, spamTokens uint32
-	for tok, c := range hamBag {
-		tid := tokenToID[tok]
-		uc := uint32(c)
-		hamCounts[tid] = uc
-		hamTokens += uc
-	}
-	for tok, c := range spamBag {
-		tid := tokenToID[tok]
-		uc := uint32(c)
-		spamCounts[tid] = uc
-		spamTokens += uc
+	for tok, s := range spamBag {
+		if _, inHam := hamBag[tok]; !inHam {
+			keep(tok, 0, s)
+		}
 	}
 
-	totalDocs := numHamDocs + numSpamDocs
-	return &Model{
+	m := &Model{
 		TokenToID:    tokenToID,
 		HamCounts:    hamCounts,
 		SpamCounts:   spamCounts,
 		hamTokens:    hamTokens,
 		spamTokens:   spamTokens,
-		vocabSize:    uint32(id),
-		minCount:     uint32(minCount),
-		logPriorHam:  math.Log(float64(numHamDocs) / float64(totalDocs)),
-		logPriorSpam: math.Log(float64(numSpamDocs) / float64(totalDocs)),
+		vocabSize:    uint32(len(hamCounts)),
+		logProbHam:   make([]float64, len(hamCounts)),
+		logProbSpam:  make([]float64, len(hamCounts)),
+		logPriorHam:  math.Log(float64(numHamDocs) / totalDocs),
+		logPriorSpam: math.Log(float64(numSpamDocs) / totalDocs),
 	}
+	for tid := range hamCounts {
+		m.logProbHam[tid] = laplaceLogProb(hamCounts[tid], hamTokens, m.vocabSize)
+		m.logProbSpam[tid] = laplaceLogProb(spamCounts[tid], spamTokens, m.vocabSize)
+	}
+	return m, nil
 }
 
-// Returns log P(word | class) with Laplace smoothing.
-// Returns 0 if the word's combined corpus frequency is below minCount.
-func (m *Model) logWordProb(word string, spam bool) float64 {
-	tid, ok := m.TokenToID[word]
-	if !ok {
-		return 0
-	}
-
-	hamCount := m.HamCounts[tid]
-	spamCount := m.SpamCounts[tid]
-
-	// Skip tokens too rare to be reliable signal.
-	if hamCount+spamCount < m.minCount {
-		return 0
-	}
-
-	var count, total uint32
-	if spam {
-		count, total = spamCount, m.spamTokens
-	} else {
-		count, total = hamCount, m.hamTokens
-	}
-
-	return math.Log(float64(count+1) / float64(total+m.vocabSize))
+// laplaceLogProb returns log P(token | class) with Laplace smoothing:
+// log((count + 1) / (classTokens + |V|)).
+func laplaceLogProb(count uint32, classTokens uint64, vocabSize uint32) float64 {
+	return math.Log(float64(count+1) / float64(classTokens+uint64(vocabSize)))
 }
 
 type ClassifyResult struct {
@@ -110,9 +97,12 @@ func (m *Model) Classify(content []byte) ClassifyResult {
 	logHam := m.logPriorHam
 	logSpam := m.logPriorSpam
 
+	// Tokens outside the kept vocabulary (unseen or below minCount) contribute nothing.
 	for _, tok := range tokens {
-		logHam += m.logWordProb(tok, false)
-		logSpam += m.logWordProb(tok, true)
+		if tid, ok := m.TokenToID[tok]; ok {
+			logHam += m.logProbHam[tid]
+			logSpam += m.logProbSpam[tid]
+		}
 	}
 
 	label := "ham"

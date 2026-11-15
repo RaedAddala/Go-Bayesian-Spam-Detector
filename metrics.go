@@ -9,7 +9,12 @@ type Metrics struct {
 	FN      int // spam predicted ham
 }
 
-func (met Metrics) Accuracy() float64 { return float64(met.Correct) / float64(met.Total) }
+func (met Metrics) Accuracy() float64 {
+	if met.Total == 0 {
+		return 0
+	}
+	return float64(met.Correct) / float64(met.Total)
+}
 func (met Metrics) Precision() float64 {
 	if met.TP+met.FP == 0 {
 		return 0
@@ -28,6 +33,24 @@ func (met Metrics) F1() float64 {
 		return 0
 	}
 	return 2 * p * r / (p + r)
+}
+
+// record adds one classified document with true label actual and predicted label pred.
+func (met *Metrics) record(actual, pred string) {
+	met.Total++
+	if actual == pred {
+		met.Correct++
+	}
+	switch {
+	case actual == "spam" && pred == "spam":
+		met.TP++
+	case actual == "ham" && pred == "spam":
+		met.FP++
+	case actual == "ham" && pred == "ham":
+		met.TN++
+	case actual == "spam" && pred == "ham":
+		met.FN++
+	}
 }
 
 // Add returns a metrics value where all counters are summed.
